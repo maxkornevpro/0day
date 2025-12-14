@@ -1,20 +1,23 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, CommandStart
-from config import BOT_TOKEN, FARM_TYPES, NFT_GIFTS, GAME_NAME
+from config import BOT_TOKEN, FARM_TYPES, NFT_GIFTS, GAME_NAME, ADMIN_IDS
 from database import (
     init_db, get_or_create_user, get_user_stars, 
     buy_farm, get_user_farms, buy_nft, get_user_nfts,
     calculate_total_boost, collect_farm_income,
     register_referral, give_referral_reward, get_referral_count,
     create_auction, get_active_auctions, place_bid, end_auction,
-    activate_farms
+    activate_farms, is_banned, ban_user, unban_user,
+    admin_add_stars, admin_add_farm, admin_add_nft,
+    get_all_users, get_all_chats, add_chat, spend_stars, add_stars
 )
 from keyboards import (
     get_main_menu, get_farm_shop_keyboard, 
-    get_nft_shop_keyboard, get_back_keyboard, get_auction_keyboard
+    get_nft_shop_keyboard, get_back_keyboard, get_auction_keyboard,
+    get_admin_menu, get_casino_menu, get_farm_select_keyboard, get_nft_select_keyboard
 )
 
 # Настройка логирования
@@ -29,6 +32,12 @@ dp = Dispatcher()
 async def cmd_start(message: Message):
     """Обработчик команды /start"""
     user_id = message.from_user.id
+    
+    # Проверка на бан
+    if await is_banned(user_id):
+        await message.answer("❌ Вы заблокированы в боте!")
+        return
+    
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
     
     # Проверяем реферальную ссылку
@@ -36,10 +45,23 @@ async def cmd_start(message: Message):
     if args:
         try:
             referrer_id = int(args[0])
+            # Запрещаем переход по своей ссылке
             if referrer_id != user_id:
                 is_new_user = await register_referral(referrer_id, user_id)
                 if is_new_user:
                     await give_referral_reward(user_id)
+                    # Уведомляем реферера
+                    try:
+                        from config import REFERRAL_REWARD
+                        referrer_name = message.from_user.full_name or f"@{message.from_user.username}" if message.from_user.username else "Пользователь"
+                        referrer_mention = f"@{message.from_user.username}" if message.from_user.username else referrer_name
+                        notification = (
+                            f"🎉 Новый пользователь {referrer_mention} зарегистрировался по вашей реферальной ссылке!\n"
+                            f"💰 Вам зачислено {REFERRAL_REWARD} ⭐"
+                        )
+                        await bot.send_message(referrer_id, notification)
+                    except:
+                        pass
         except ValueError:
             pass
     
@@ -724,6 +746,484 @@ async def handle_back(callback: CallbackQuery):
     """Обработчик кнопки назад"""
     await callback.answer()
     await callback.message.delete()
+
+# Админ панель
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    """Команда /admin"""
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("❌ У вас нет доступа к админ панели!")
+        return
+    
+    admin_text = (
+        "🔐 Админ панель\n\n"
+        "Выберите действие:"
+    )
+    await message.answer(admin_text, reply_markup=get_admin_menu())
+
+@dp.callback_query(F.data == "admin_back")
+async def admin_back(callback: CallbackQuery):
+    """Вернуться в админ меню"""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    await callback.message.edit_text("🔐 Админ панель\n\nВыберите действие:", reply_markup=get_admin_menu())
+
+@dp.callback_query(F.data == "admin_give_stars")
+async def admin_give_stars_handler(callback: CallbackQuery):
+    """Админ: выдать звезды"""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "💰 Выдача звезд\n\n"
+        "Отправьте в формате:\n"
+        "<code>/give_stars user_id amount</code>\n\n"
+        "Пример: /give_stars 123456789 1000",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+        ])
+    )
+
+@dp.message(Command("give_stars"))
+async def cmd_give_stars(message: Message):
+    """Выдать звезды пользователю"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        await message.reply("Использование: /give_stars user_id amount")
+        return
+    
+    try:
+        user_id = int(args[1])
+        amount = int(args[2])
+        await admin_add_stars(user_id, amount)
+        await message.reply(f"✅ Пользователю {user_id} выдано {amount} ⭐")
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.callback_query(F.data == "admin_give_farm")
+async def admin_give_farm_handler(callback: CallbackQuery):
+    """Админ: выдать ферму"""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🌾 Выдача фермы\n\n"
+        "Выберите тип фермы:",
+        reply_markup=get_farm_select_keyboard()
+    )
+
+@dp.callback_query(F.data.startswith("admin_farm_"))
+async def admin_give_farm_select(callback: CallbackQuery):
+    """Админ: выбор фермы"""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    
+    farm_id = callback.data.split("_")[2]
+    await callback.message.edit_text(
+        f"🌾 Выдача фермы\n\n"
+        f"Тип: {FARM_TYPES[farm_id]['name']}\n\n"
+        f"Отправьте ID пользователя:\n"
+        f"<code>/give_farm {farm_id} user_id</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_give_farm")]
+        ])
+    )
+
+@dp.message(Command("give_farm"))
+async def cmd_give_farm(message: Message):
+    """Выдать ферму пользователю"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        await message.reply("Использование: /give_farm farm_id user_id")
+        return
+    
+    try:
+        farm_id = args[1]
+        user_id = int(args[2])
+        if farm_id not in FARM_TYPES:
+            await message.reply("❌ Неверный тип фермы!")
+            return
+        await admin_add_farm(user_id, farm_id)
+        await message.reply(f"✅ Пользователю {user_id} выдана {FARM_TYPES[farm_id]['name']}")
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.callback_query(F.data == "admin_give_nft")
+async def admin_give_nft_handler(callback: CallbackQuery):
+    """Админ: выдать NFT"""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🎁 Выдача NFT\n\n"
+        "Выберите NFT:",
+        reply_markup=get_nft_select_keyboard()
+    )
+
+@dp.callback_query(F.data.startswith("admin_nft_"))
+async def admin_give_nft_select(callback: CallbackQuery):
+    """Админ: выбор NFT"""
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    
+    nft_id = callback.data.split("_")[2]
+    await callback.message.edit_text(
+        f"🎁 Выдача NFT\n\n"
+        f"Тип: {NFT_GIFTS[nft_id]['name']}\n\n"
+        f"Отправьте ID пользователя:\n"
+        f"<code>/give_nft {nft_id} user_id</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_give_nft")]
+        ])
+    )
+
+@dp.message(Command("give_nft"))
+async def cmd_give_nft(message: Message):
+    """Выдать NFT пользователю"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        await message.reply("Использование: /give_nft nft_id user_id")
+        return
+    
+    try:
+        nft_id = args[1]
+        user_id = int(args[2])
+        if nft_id not in NFT_GIFTS:
+            await message.reply("❌ Неверный тип NFT!")
+            return
+        await admin_add_nft(user_id, nft_id)
+        await message.reply(f"✅ Пользователю {user_id} выдано {NFT_GIFTS[nft_id]['name']}")
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    """Забанить пользователя"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2:
+        await message.reply("Использование: /ban user_id [причина]")
+        return
+    
+    try:
+        user_id = int(args[1])
+        reason = args[2] if len(args) > 2 else "Нарушение правил"
+        await ban_user(user_id, reason, message.from_user.id)
+        await message.reply(f"✅ Пользователь {user_id} забанен. Причина: {reason}")
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    """Разбанить пользователя"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Использование: /unban user_id")
+        return
+    
+    try:
+        user_id = int(args[1])
+        await unban_user(user_id)
+        await message.reply(f"✅ Пользователь {user_id} разбанен")
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    """Рассылка всем пользователям"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    if not message.reply_to_message:
+        await message.reply("Ответьте на сообщение для рассылки")
+        return
+    
+    text = message.reply_to_message.text or message.reply_to_message.caption
+    if not text:
+        await message.reply("Сообщение должно содержать текст")
+        return
+    
+    users = await get_all_users()
+    chats = await get_all_chats()
+    
+    sent = 0
+    failed = 0
+    
+    await message.reply(f"📢 Начинаю рассылку...\nПользователей: {len(users)}\nЧатов: {len(chats)}")
+    
+    # Рассылка пользователям
+    for user in users:
+        try:
+            await bot.send_message(user['user_id'], text)
+            sent += 1
+        except:
+            failed += 1
+    
+    # Рассылка в чаты
+    for chat in chats:
+        try:
+            await bot.send_message(chat['chat_id'], text)
+            sent += 1
+        except:
+            failed += 1
+    
+    await message.reply(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
+
+# Казино
+@dp.message(F.text == "🎰 Казино")
+async def show_casino(message: Message):
+    """Показать казино"""
+    user_id = message.from_user.id
+    if await is_banned(user_id):
+        return
+    
+    stars = await get_user_stars(user_id)
+    casino_text = (
+        f"🎰 Казино\n\n"
+        f"⭐ Ваши звезды: {stars}\n\n"
+        f"Выберите игру:"
+    )
+    await message.answer(casino_text, reply_markup=get_casino_menu())
+
+@dp.callback_query(F.data == "casino_dice")
+async def casino_dice(callback: CallbackQuery):
+    """Игра в кости"""
+    user_id = callback.from_user.id
+    if await is_banned(user_id):
+        await callback.answer("❌ Вы заблокированы!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "🎲 Кости\n\n"
+        "Ставка: удвоение\n\n"
+        "Отправьте сумму ставки:\n"
+        "<code>/dice amount</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+        ])
+    )
+
+@dp.message(Command("dice"))
+async def cmd_dice(message: Message):
+    """Игра в кости"""
+    user_id = message.from_user.id
+    if await is_banned(user_id):
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Использование: /dice amount")
+        return
+    
+    try:
+        bet = int(args[1])
+        stars = await get_user_stars(user_id)
+        
+        if bet < 10:
+            await message.reply("❌ Минимальная ставка: 10 ⭐")
+            return
+        
+        if bet > stars:
+            await message.reply("❌ Недостаточно звезд!")
+            return
+        
+        await spend_stars(user_id, bet)
+        
+        import random
+        player_dice = random.randint(1, 6)
+        bot_dice = random.randint(1, 6)
+        
+        if player_dice > bot_dice:
+            win = bet * 2
+            await add_stars(user_id, win)
+            await message.reply(
+                f"🎲 Вы: {player_dice}\n"
+                f"🎲 Бот: {bot_dice}\n\n"
+                f"✅ Вы выиграли {win} ⭐!"
+            )
+        else:
+            await message.reply(
+                f"🎲 Вы: {player_dice}\n"
+                f"🎲 Бот: {bot_dice}\n\n"
+                f"❌ Вы проиграли {bet} ⭐"
+            )
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.callback_query(F.data == "casino_slots")
+async def casino_slots_handler(callback: CallbackQuery):
+    """Игра в слоты"""
+    user_id = callback.from_user.id
+    if await is_banned(user_id):
+        await callback.answer("❌ Вы заблокированы!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "🎰 Слоты\n\n"
+        "Ставка: утроение\n\n"
+        "Отправьте сумму ставки:\n"
+        "<code>/slots amount</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+        ])
+    )
+
+@dp.message(Command("slots"))
+async def cmd_slots(message: Message):
+    """Игра в слоты"""
+    user_id = message.from_user.id
+    if await is_banned(user_id):
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Использование: /slots amount")
+        return
+    
+    try:
+        bet = int(args[1])
+        stars = await get_user_stars(user_id)
+        
+        if bet < 10:
+            await message.reply("❌ Минимальная ставка: 10 ⭐")
+            return
+        
+        if bet > stars:
+            await message.reply("❌ Недостаточно звезд!")
+            return
+        
+        await spend_stars(user_id, bet)
+        
+        import random
+        symbols = ["🍒", "🍋", "🍊", "🍇", "⭐", "💎"]
+        slot1 = random.choice(symbols)
+        slot2 = random.choice(symbols)
+        slot3 = random.choice(symbols)
+        
+        if slot1 == slot2 == slot3:
+            win = bet * 3
+            await add_stars(user_id, win)
+            await message.reply(
+                f"🎰 [{slot1}] [{slot2}] [{slot3}]\n\n"
+                f"🎉 ДЖЕКПОТ!\n"
+                f"✅ Вы выиграли {win} ⭐!"
+            )
+        elif slot1 == slot2 or slot2 == slot3 or slot1 == slot3:
+            win = bet * 2
+            await add_stars(user_id, win)
+            await message.reply(
+                f"🎰 [{slot1}] [{slot2}] [{slot3}]\n\n"
+                f"✅ Вы выиграли {win} ⭐!"
+            )
+        else:
+            await message.reply(
+                f"🎰 [{slot1}] [{slot2}] [{slot3}]\n\n"
+                f"❌ Вы проиграли {bet} ⭐"
+            )
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+@dp.callback_query(F.data == "casino_roulette")
+async def casino_roulette_handler(callback: CallbackQuery):
+    """Игра в рулетку"""
+    user_id = callback.from_user.id
+    if await is_banned(user_id):
+        await callback.answer("❌ Вы заблокированы!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "🎯 Рулетка\n\n"
+        "Ставка: учетверение\n\n"
+        "Отправьте сумму ставки:\n"
+        "<code>/roulette amount</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+        ])
+    )
+
+@dp.message(Command("roulette"))
+async def cmd_roulette(message: Message):
+    """Игра в рулетку"""
+    user_id = message.from_user.id
+    if await is_banned(user_id):
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Использование: /roulette amount")
+        return
+    
+    try:
+        bet = int(args[1])
+        stars = await get_user_stars(user_id)
+        
+        if bet < 10:
+            await message.reply("❌ Минимальная ставка: 10 ⭐")
+            return
+        
+        if bet > stars:
+            await message.reply("❌ Недостаточно звезд!")
+            return
+        
+        await spend_stars(user_id, bet)
+        
+        import random
+        colors = ["🔴", "⚫", "🟢"]
+        player_color = random.choice(colors)
+        wheel_color = random.choice(colors)
+        
+        if player_color == wheel_color:
+            multiplier = 5 if wheel_color == "🟢" else 4
+            win = bet * multiplier
+            await add_stars(user_id, win)
+            await message.reply(
+                f"🎯 Вы выбрали: {player_color}\n"
+                f"🎯 Выпало: {wheel_color}\n\n"
+                f"✅ Вы выиграли {win} ⭐!"
+            )
+        else:
+            await message.reply(
+                f"🎯 Вы выбрали: {player_color}\n"
+                f"🎯 Выпало: {wheel_color}\n\n"
+                f"❌ Вы проиграли {bet} ⭐"
+            )
+    except ValueError:
+        await message.reply("❌ Неверный формат!")
+
+# Приветствие при добавлении в чат
+@dp.message(F.new_chat_members)
+async def on_new_member(message: Message):
+    """Обработчик добавления бота в чат"""
+    for member in message.new_chat_members:
+        if member.id == bot.id:
+            await add_chat(message.chat.id, message.chat.type, message.chat.title)
+            welcome_text = (
+                f"🌟 Добро пожаловать в {GAME_NAME}!\n\n"
+                f"Я игровой бот с фермами, NFT и казино!\n\n"
+                f"Используйте команды:\n"
+                f"/start - Начать игру\n"
+                f"/help - Справка\n"
+                f"/profile - Профиль\n"
+                f"/casino - Казино"
+            )
+            await message.reply(welcome_text)
 
 async def main():
     """Главная функция"""

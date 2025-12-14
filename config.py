@@ -11,6 +11,9 @@ INITIAL_STARS = 200  # Начальное количество звезд
 FARM_BASE_PRICE = 50  # Базовая цена фермы
 FARM_BASE_INCOME = 5  # Базовый доход с фермы в час
 
+# Админы
+ADMIN_IDS = [5538590798, 891015442, 5253753886]
+
 # NFT подарки Telegram (их ID в Telegram)
 NFT_GIFTS = {
     "snoop_dogg": {

@@ -71,6 +71,26 @@ async def init_db():
             )
         """)
         
+        # Таблица банов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bans (
+                user_id INTEGER PRIMARY KEY,
+                reason TEXT,
+                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                banned_by INTEGER
+            )
+        """)
+        
+        # Таблица чатов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_type TEXT,
+                title TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         await db.commit()
 
 async def get_or_create_user(user_id: int) -> Dict:
@@ -310,6 +330,7 @@ async def collect_farm_income(user_id: int) -> int:
 # Реферальная система
 async def register_referral(referrer_id: int, referred_id: int) -> bool:
     """Зарегистрировать реферала (возвращает True если это новый реферал)"""
+    # Запрещаем переход по своей ссылке
     if referrer_id == referred_id:
         return False
     
@@ -486,4 +507,79 @@ async def end_auction(auction_id: int) -> Optional[Dict]:
             await db.commit()
         
         return auction_dict
+
+# Админ функции
+async def is_banned(user_id: int) -> bool:
+    """Проверить, забанен ли пользователь"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT * FROM bans WHERE user_id = ?",
+            (user_id,)
+        )
+        return cursor.fetchone() is not None
+
+async def ban_user(user_id: int, reason: str, admin_id: int):
+    """Забанить пользователя"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO bans (user_id, reason, banned_by) VALUES (?, ?, ?)",
+            (user_id, reason, admin_id)
+        )
+        await db.commit()
+
+async def unban_user(user_id: int):
+    """Разбанить пользователя"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "DELETE FROM bans WHERE user_id = ?",
+            (user_id,)
+        )
+        await db.commit()
+
+async def admin_add_stars(user_id: int, amount: int):
+    """Админ: добавить звезды пользователю"""
+    await add_stars(user_id, amount)
+
+async def admin_add_farm(user_id: int, farm_type: str):
+    """Админ: добавить ферму пользователю"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO farms (user_id, farm_type, last_activated, is_active) VALUES (?, ?, ?, 0)",
+            (user_id, farm_type, datetime.now().isoformat())
+        )
+        await db.commit()
+
+async def admin_add_nft(user_id: int, nft_type: str):
+    """Админ: добавить NFT пользователю"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO nfts (user_id, nft_type) VALUES (?, ?)",
+            (user_id, nft_type)
+        )
+        await db.commit()
+
+async def get_all_users() -> List[Dict]:
+    """Получить всех пользователей"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users")
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
+
+async def get_all_chats() -> List[Dict]:
+    """Получить все чаты"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM chats")
+        chats = await cursor.fetchall()
+        return [dict(chat) for chat in chats]
+
+async def add_chat(chat_id: int, chat_type: str, title: str = None):
+    """Добавить чат в базу"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO chats (chat_id, chat_type, title) VALUES (?, ?, ?)",
+            (chat_id, chat_type, title)
+        )
+        await db.commit()
 

@@ -8,7 +8,7 @@ def get_main_menu():
             [KeyboardButton(text="⭐ Мой профиль"), KeyboardButton(text="🌾 Мои фермы")],
             [KeyboardButton(text="🛒 Магазин ферм"), KeyboardButton(text="🎁 Магазин NFT")],
             [KeyboardButton(text="💰 Собрать доход"), KeyboardButton(text="🔗 Реферальная ссылка")],
-            [KeyboardButton(text="🔨 Аукцион")]
+            [KeyboardButton(text="🔨 Аукцион"), KeyboardButton(text="🎰 Казино")]
         ],
         resize_keyboard=True
     )
